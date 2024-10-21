@@ -1,0 +1,7 @@
+name: dentex2023_cropped
+
+data_root: /home/youmin/workspace/VFMs-Adapters-Ensemble/dental-disease-classification/dentex2023_cropped/
+batch_size: 32
+epoch: 100
+num_classes: 4
+save_path: ./checkpoints/checkpoints_dentex2023
