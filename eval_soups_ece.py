@@ -9,7 +9,7 @@ import numpy as np
 
 from utils import read_conf, validation_accuracy, ModelWithTemperature, validate, evaluate, calculate_ece, calculate_nll
 import dino_variant
-from data import cifar10, cifar100, cub, ham10000
+from data import dentex2023
 import rein
 
 # Model forward function
@@ -34,46 +34,42 @@ def initialize_models(save_paths, variant, config, device):
             
 # Data loader setup
 def setup_data_loaders(args, data_path, batch_size):
-    if args.data == 'cifar10':
-        test_loader = cifar10.get_test_loader(batch_size, shuffle=True, num_workers=4, pin_memory=True, get_val_temp=0, data_dir=data_path)
-        valid_loader = None
-    elif args.data == 'cifar100':
-        test_loader = cifar100.get_test_loader(data_dir=data_path, batch_size=32, shuffle=True, num_workers=4, pin_memory=True)
-        _, valid_loader = cifar100.get_train_valid_loader(data_dir=data_path, augment=True, batch_size=32, valid_size=0.1, random_seed=42, shuffle=True, num_workers=4, pin_memory=True)
-    elif args.data == 'cub':
-        test_loader = cub.get_test_loader(data_path, batch_size=32, scale_size=256, crop_size=224, num_workers=4, pin_memory=True)
-        _, valid_loader = cub.get_train_val_loader(data_path, batch_size=32, scale_size=256, crop_size=224, num_workers=4, pin_memory=True)
-    elif args.data == 'ham10000':
-        _, valid_loader, test_loader = ham10000.get_dataloaders(data_path, batch_size=32, num_workers=4)
-    else:
-        raise ValueError(f"Unsupported data type: {args.data}")
-    
+    # Load test data
+    if args.data == 'dentex2023':
+        _, valid_loader, test_loader = dentex2023.get_data_loaders(data_dir=data_path, batch_size=batch_size, num_workers=4)
+        
     return test_loader, valid_loader
 
 # Greedy soup model ensembling
 def greedy_soup_ensemble(models, valid_loader, device):
+    # Calculate ECE for each model and sort them by ECE in ascending order (lower ECE is better)
     ece_list = [validate(model, valid_loader, device) for model in models]
     sorted_models = sorted([(model, ece) for model, ece in zip(models, ece_list)], key=lambda x: x[1])
-    print(f'Sorted models: {sorted_models[0][1]}, {sorted_models[1][1]}, {sorted_models[2][1]}, {sorted_models[3][1]}')
+    print(f'Sorted models ECE: {sorted_models[0][1]}, {sorted_models[1][1]}, {sorted_models[2][1]}, {sorted_models[3][1]}')
 
     best_ece = sorted_models[0][1]
     greedy_soup_params = sorted_models[0][0].state_dict()
+    best_params = {k: v.clone() for k, v in greedy_soup_params.items()}  # Keep a copy of the best parameters
     greedy_soup_ingredients = [sorted_models[0][0]]
     
-    TOLERANCE = 0.01
+    TOLERANCE = 0.01  # Acceptable tolerance for ECE
+
     for i in range(1, len(models)):
         new_ingredient_params = sorted_models[i][0].state_dict()
         num_ingredients = len(greedy_soup_ingredients)
         print(f'Num ingredients: {num_ingredients}')
         
+        # Backup current greedy_soup_params before adding new ingredient
         previous_greedy_soup_params = {k: v.clone() for k, v in greedy_soup_params.items()}
         
+        # Calculate potential new parameters with the new ingredient
         potential_greedy_soup_params = {
             k: greedy_soup_params[k] * (num_ingredients / (num_ingredients + 1)) + 
                new_ingredient_params[k] * (1. / (num_ingredients + 1))
             for k in new_ingredient_params
         }
 
+        # Temporarily load potential parameters to test validation ECE
         sorted_models[0][0].load_state_dict(potential_greedy_soup_params)
         sorted_models[0][0].eval()
         
@@ -89,22 +85,27 @@ def greedy_soup_ensemble(models, valid_loader, device):
         targets = torch.cat(targets).numpy().astype(int)
         held_out_val_ece = calculate_ece(outputs, targets)
         
-        print(f'Potential greedy soup val ece {held_out_val_ece}, best so far {best_ece}.')
+        print(f'Potential greedy soup ECE: {held_out_val_ece}, best ECE so far: {best_ece}.')
+        
+        # Add new ingredient to the greedy soup if it improves ECE or is within tolerance
         if held_out_val_ece < best_ece + TOLERANCE:
             if held_out_val_ece < best_ece:
                 best_ece = held_out_val_ece
-            greedy_soup_ingredients.append(sorted_models[i])
+                best_params = {k: v.clone() for k, v in potential_greedy_soup_params.items()}  # Update best params
+            greedy_soup_ingredients.append(sorted_models[i][0])
             greedy_soup_params = potential_greedy_soup_params
-            print(f'Adding to soup.')
+            print(f'Added new ingredient to soup. Total ingredients: {len(greedy_soup_ingredients)}')
         else:
+            # Revert to the best-known parameters if the new ingredient didn’t improve ECE
             greedy_soup_params = previous_greedy_soup_params
-            sorted_models[0][0].load_state_dict(previous_greedy_soup_params)
-            
-    return greedy_soup_params, sorted_models[0][0]
+            sorted_models[0][0].load_state_dict(best_params)  # Load the actual best parameters
+            print(f'No improvement. Reverting to best-known parameters.')
+
+    return best_params, sorted_models[0][0]
 
 def train():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--data', '-d', type=str, default='cub')
+    parser.add_argument('--data', '-d', type=str, default='dentex2023')
     parser.add_argument('--gpu', '-g', default='0', type=str)
     parser.add_argument('--netsize', default='s', type=str)
     parser.add_argument('--type', '-t', default='rein', type=str)
