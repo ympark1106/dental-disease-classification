@@ -6,11 +6,9 @@ import argparse
 import timm
 import numpy as np
 from utils import read_conf, validation_accuracy
-
+from torchvision import models
 import random
-import rein
 
-import dino_variant
 from data import dentex2023
 from sklearn.metrics import f1_score
 
@@ -45,36 +43,28 @@ def train():
     if args.data == 'dentex2023':
         train_loader, valid_loader, _ = dentex2023.get_data_loaders(data_dir=data_path, batch_size=batch_size, num_workers=4)
 
-    if args.netsize == 's':
-        model_load = dino_variant._small_dino
-        variant = dino_variant._small_variant
 
-
-    model = torch.hub.load('facebookresearch/dinov2', model_load)
-    for param in model.parameters():
-        param.requires_grad = False
-    model.linear = nn.Linear(variant['embed_dim'], config['num_classes'])
-    model.linear.requires_grad = True
+    model = models.resnet50(pretrained=True)
+    num_ftrs = model.fc.in_features
+    model.fc = nn.Linear(num_ftrs, config['num_classes'])
     model.to(device)
+
     
     print(model)
     
-    num_params = count_trainable_params(model)
-    print(f"Number of trainable parameters: {num_params}")
+    # exit()
+    # num_params = count_trainable_params(model)
+    # print(f"Number of trainable parameters: {num_params}")
     
     criterion = torch.nn.CrossEntropyLoss()
     model.eval()
     
     # optimizer = torch.optim.Adam(model.parameters(), lr=1e-3, weight_decay = 1e-5)
-    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay = 1e-6)
+    optimizer = torch.optim.Adam(model.parameters(), lr=1e-4, weight_decay=1e-6)
     scheduler = torch.optim.lr_scheduler.MultiStepLR(optimizer, lr_decay)
-    saver = timm.utils.CheckpointSaver(model, optimizer, checkpoint_dir= save_path, max_history = 1) 
-    # print(train_loader.dataset[0][0].shape)
+    saver = timm.utils.CheckpointSaver(model, optimizer, checkpoint_dir=save_path, max_history=1)
 
-    # f = open(os.path.join(save_path, 'epoch_acc.txt'), 'w')
-    avg_accuracy = 0.0
     for epoch in range(max_epoch):
-        ## training
         model.train()
         total_loss = 0
         total = 0
@@ -83,35 +73,27 @@ def train():
             inputs, targets = inputs.to(device), targets.to(device)
             optimizer.zero_grad()
             
-            with torch.no_grad():
-                outputs = model(inputs)
-            outputs = model.linear(outputs)
+            outputs = model(inputs) 
             loss = criterion(outputs, targets)
-            loss.backward()            
+            loss.backward()
             optimizer.step()
 
-            total_loss += loss
+            total_loss += loss.item() 
             total += targets.size(0)
-            _, predicted = outputs[:len(targets)].max(1)            
-            correct += predicted.eq(targets).sum().item()            
-            print('\r', batch_idx, len(train_loader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)'
-                        % (total_loss/(batch_idx+1), 100.*correct/total, correct, total), end = '')
-            train_accuracy = correct/total
-                  
-        train_avg_loss = total_loss/len(train_loader)
+            _, predicted = outputs[:len(targets)].max(1)
+            correct += predicted.eq(targets).sum().item()
+
+            print('\r', batch_idx, len(train_loader), 'Loss: %.3f | Acc: %.3f%% (%d/%d)' %
+                (total_loss / (batch_idx + 1), 100. * correct / total, correct, total), end='')
         print()
 
-        ## validation
-        model.eval()
-        total_loss = 0
-        total = 0
-        correct = 0
-
-        valid_accuracy = validation_accuracy(model, valid_loader, device, mode = 'linear')
+        # validation
+        valid_accuracy = validation_accuracy(model, valid_loader, device, mode='resnet')
         scheduler.step()
+        saver.save_checkpoint(epoch, metric=valid_accuracy)
+        print('EPOCH {:4}, TRAIN [loss - {:.4f}, acc - {:.4f}], VALID [acc - {:.4f}]\n'.format(
+            epoch, total_loss / len(train_loader), correct / total, valid_accuracy))
 
-        saver.save_checkpoint(epoch, metric = valid_accuracy)
-        print('EPOCH {:4}, TRAIN [loss - {:.4f}, acc - {:.4f}], VALID [acc - {:.4f}]\n'.format(epoch, train_avg_loss, train_accuracy, valid_accuracy))
         print(scheduler.get_last_lr())
 
     

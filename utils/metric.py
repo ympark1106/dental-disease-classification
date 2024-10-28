@@ -8,9 +8,15 @@ recall_level_default = 0.95
 def validation_accuracy(model, loader, device, mode = 'rein'):
     total = 0
     correct = 0
+    def resnet(model, inputs):
+        outputs = model(inputs)
+        return outputs
     
     def linear(model, inputs):
+        # print('inputs:', type(inputs))
         f = model(inputs)
+        print('f:', type(f))
+        f = torch.tensor(f)
         outputs = model.linear(f)
         return outputs
     
@@ -44,6 +50,7 @@ def validation_accuracy(model, loader, device, mode = 'rein'):
     def resnet(model, inputs):
         outputs = model(inputs)
         return outputs
+    
     if mode == 'rein':
         out = rein
     elif mode == 'no_rein':
@@ -52,7 +59,7 @@ def validation_accuracy(model, loader, device, mode = 'rein'):
         out = rein3
     elif mode == 'resnet':
         out = resnet
-    else:
+    elif mode == 'linear':
         out = linear
 
     model.eval()
